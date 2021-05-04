@@ -24,9 +24,11 @@ import sys
 import tiles
 import selectors
 import types
-from random import randint
+import random
+import time
 
-MAX_PLAYERS = 2
+MAX_PLAYERS = 3
+WON_DELAY_S = 4
 
 # connections
 sel = selectors.DefaultSelector()
@@ -38,6 +40,9 @@ currentTurn = 0
 # currentTurn = random.randint(0,MAX_PLAYERS)
 start_game_flag = False
 started_idnums = []
+first_start = True
+ig_welc_msgs = []
+eliminated_clients = []
 
 
 def client_handler(key, mask):
@@ -46,11 +51,15 @@ def client_handler(key, mask):
   connection = key.fileobj
   host, port = data.addr
   name = '{}:{}'.format(host, port)
-
+ 
   # GLOBALS
   global start_game_flag
   global currentTurn
   global first_start
+  global ig_welc_msgs
+  global eliminated
+  global started_idnums
+  global eliminated_clients
 
 
   # Add id check, use connections
@@ -59,7 +68,12 @@ def client_handler(key, mask):
   if idnum not in live_idnums:
     live_idnums.append(idnum)
     # NOTIFY ALL PLAYERS, ANOTHER PLAYER JOINED
+    if ig_welc_msgs:
+      for msg in ig_welc_msgs:
+        connection.send(msg)
     send_msg_all_clients(tiles.MessagePlayerJoined(name, idnum).pack())
+    ig_welc_msgs.append(tiles.MessagePlayerJoined(name, idnum).pack())
+    tiles.MessagePlayerJoined(name, idnum).pack()
     # After this connection, have enouph players joined?
     if len(live_idnums) >= MAX_PLAYERS:
       start_game_flag = True
@@ -81,12 +95,46 @@ def client_handler(key, mask):
   # Once the game has begun, this is the point.
   if first_start:
     first_start = False
-    all_message = tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack()
-    send_to_all = live_idnums.copy()
+    send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
 
   #if it ain't ur turn, NO ONE CARES .
+  # or you are a spectator
   if not idnum == started_idnums[currentTurn]:
     return
+
+  # no moves for you if you are eliminated,
+  # move onto next non-eliminated player
+  if idnum in eliminated_clients:
+    currentTurn += 1
+    print("Player {1} ({0}) eliminated, skipping turn...".format(name, idnum))
+    send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
+    return
+
+
+  # game over, time for round 2, or n+1...
+  if len(eliminated_clients) == (MAX_PLAYERS-1):
+
+    time.sleep(WON_DELAY_S)
+
+    if idnum not in eliminated_clients:
+      # GAME HAS BEEN WON, START A NEW SEQUENCE HERE.
+      send_msg_all_clients(tiles.MessageGameStart().pack())
+      # random new clients to play game, if more than max connections
+      currentTurn = 0
+      eliminated_clients = []
+      if len(live_idnums) > MAX_PLAYERS:
+        started_idnums = random.sample(live_idnums, MAX_PLAYERS)
+      else:
+        started_idnums = live_idnums.copy()
+
+      for idnum in started_idnums:
+        for _ in range(tiles.HAND_SIZE):
+          tileid = tiles.get_random_tileid()
+          msg_specific_client(tiles.MessageAddTileToHand(tileid).pack(), idnum)
+      first_start = True
+      board.reset()
+      return
+
   
 
   buffer = bytearray()
@@ -112,17 +160,19 @@ def client_handler(key, mask):
     if isinstance(msg, tiles.MessagePlaceTile):
       if board.set_tile(msg.x, msg.y, msg.tileid, msg.rotation, msg.idnum):
         # notify client that placement was successful
-        connection.send(msg.pack())
+        send_msg_all_clients(msg.pack())
 
         # check for token movement
         positionupdates, eliminated = board.do_player_movement(live_idnums)
 
         for msg in positionupdates:
-          connection.send(msg.pack())
+          send_msg_all_clients(msg.pack())
         
-        if idnum in eliminated:
-          connection.send(tiles.MessagePlayerEliminated(idnum).pack())
-          return
+        for idnum in eliminated:
+          if idnum not in eliminated_clients:
+            print("A player was eliminated!")
+            eliminated_clients.append(idnum)
+            send_msg_all_clients(tiles.MessagePlayerEliminated(idnum).pack())
 
         # pickup a new tile
         tileid = tiles.get_random_tileid()
@@ -132,7 +182,7 @@ def client_handler(key, mask):
         currentTurn += 1
         #back to first player
         # -------------- THIS NEEDS TO LATER BE CHANGED FROM 0 TO INITIAL PLAYER ---------------
-        if currentTurn > MAX_PLAYERS:
+        if currentTurn > MAX_PLAYERS - 1:
           currentTurn = 0
         send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
         # OLD
@@ -147,14 +197,18 @@ def client_handler(key, mask):
           positionupdates, eliminated = board.do_player_movement(live_idnums)
 
           for msg in positionupdates:
-            connection.send(msg.pack())
+            send_msg_all_clients(msg.pack())
           
-          if idnum in eliminated:
-            connection.send(tiles.MessagePlayerEliminated(idnum).pack())
-            return
+          for idnum in eliminated:
+            if idnum not in eliminated_clients:
+              eliminated_clients.append(idnum)
+              send_msg_all_clients(tiles.MessagePlayerEliminated(idnum).pack())
           
           # start next turn
           currentTurn += 1
+          if currentTurn > MAX_PLAYERS - 1:
+            currentTurn = 0
+          send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
           # OLD
           # connection.send(tiles.MessagePlayerTurn(idnum).pack())
 
@@ -162,7 +216,7 @@ def client_handler(key, mask):
 def accept_new_client(socket, times_connected):
     global client_connections
     connection, address = socket.accept() # READ, SET IN SELECTOR BELOW
-    client_connections.append(connection)
+    client_connections.append([connection, times_connected])
     print("New connection accepted from {}, connection id: {}".format(address, times_connected))
     connection.setblocking(False) # NEED THIS OR SERVER HANGS
     data = types.SimpleNamespace(addr=address, idnum=times_connected)
@@ -172,8 +226,15 @@ def accept_new_client(socket, times_connected):
 
 def send_msg_all_clients(msg):
   global client_connections
-  for conn in client_connections:
-    conn.send(msg)
+  for client in client_connections:
+    connection = client[0]
+    connection.send(msg)
+
+def msg_specific_client(msg, idnum):
+  global client_connections
+  for client in client_connections:
+    if client[1] == idnum:
+      client[0].send(msg)
 
 
 # A list of tuples outlining the connections to the server
@@ -190,7 +251,7 @@ listen_sock.bind(server_address)
 
 print('listening on {}'.format(listen_sock.getsockname()))
 
-listen_sock.listen(16)
+listen_sock.listen(32)
 listen_sock.setblocking(False)
 
 # selector usage
@@ -205,7 +266,4 @@ while True:
             accept_new_client(key.fileobj, times_connected)
             times_connected += 1
         else:
-            if all_msg:
-              send_msg_to_all(key, mask)
-            else:
-              client_handler(key, mask) # A client socket which has already been accepted.
+            client_handler(key, mask) # A client socket which has already been accepted.

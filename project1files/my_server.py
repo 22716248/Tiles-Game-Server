@@ -37,131 +37,114 @@ client_connections = []
 # flags/parameters which outline the current game state
 board = tiles.Board()
 currentTurn = 0
-# currentTurn = random.randint(0,MAX_PLAYERS)
-start_game_flag = False
 started_idnums = []
 first_start = True
-ig_welc_msgs = []
+joined_msgs = []
 eliminated_clients = []
+disconnected_clients = []
 
-
+""" HANDLES CLIENT CONNECTIONS """
 def client_handler(key, mask):
 
+  # - SET UP DATA -
   data = key.data
-  connection = key.fileobj
   host, port = data.addr
   name = '{}:{}'.format(host, port)
- 
-  # GLOBALS
-  global start_game_flag
+  idnum = data.idnum
+  
+
+
+  # - GLOBALS -
   global currentTurn
   global first_start
-  global ig_welc_msgs
-  global eliminated
+  global joined_msgs
   global started_idnums
   global eliminated_clients
 
+  # if a player leaves before every active player makes a turn, the client crashes...
+  msg = receive_msg_client(key, mask, idnum)
 
-  # Add id check, use connections
-  # Initiates a new player joining.
-  idnum = data.idnum
+  # --  NEW PLAYER JOINS --
   if idnum not in live_idnums:
-    live_idnums.append(idnum)
-    # NOTIFY ALL PLAYERS, ANOTHER PLAYER JOINED
-    if ig_welc_msgs:
-      for msg in ig_welc_msgs:
-        connection.send(msg)
-    send_msg_all_clients(tiles.MessagePlayerJoined(name, idnum).pack())
-    ig_welc_msgs.append(tiles.MessagePlayerJoined(name, idnum).pack())
-    tiles.MessagePlayerJoined(name, idnum).pack()
-    # After this connection, have enouph players joined?
-    if len(live_idnums) >= MAX_PLAYERS:
-      start_game_flag = True
-    connection.send(tiles.MessageWelcome(idnum).pack())
+    new_player_joined(name, idnum)
 
-  # If game is ready to start, start game for players, then reloop.
-  if start_game_flag:
-    if idnum not in started_idnums:
-      connection.send(tiles.MessageGameStart().pack())
-      started_idnums.append(idnum)
-
-      for _ in range(tiles.HAND_SIZE):
-        tileid = tiles.get_random_tileid()
-        connection.send(tiles.MessageAddTileToHand(tileid).pack())
-
-  if len(started_idnums) < MAX_PLAYERS: # do not move on until game is full.
+  # -- START FIRST GAME --
+  if len(live_idnums) >= MAX_PLAYERS:
+    if first_start:
+      first_start = False
+      start_new_game()
+  else:
+    # - CANNOT CONTINUE UNLESS SUFFICIENT PLAYERS CONNECTED -
     return
+  
+  # -- SKIP DISCONNECTED PLAYERS --
+  if started_idnums[currentTurn] in disconnected_clients:
+    currentTurn += 1
+    if currentTurn > MAX_PLAYERS - 1:
+          currentTurn = 0
+    print("Player {1} ({0}) eliminated, skipping turn...".format(name, idnum))
 
-  # Once the game has begun, this is the point.
-  if first_start:
-    first_start = False
+    # --- SEND NEXT TURN MESSAGE ---
     send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
 
-  #if it ain't ur turn, NO ONE CARES .
-  # or you are a spectator
-  if not idnum == started_idnums[currentTurn]:
+  # -- SKIP CURRENT IDNUM -- IF -> (1) It isn't their turn -> (2) They are a spectator --
+  if idnum != started_idnums[currentTurn]:
     return
 
-  # no moves for you if you are eliminated,
-  # move onto next non-eliminated player
+  # -- SKIP ELIMINATED PLAYERS --
   if idnum in eliminated_clients:
     currentTurn += 1
+    if currentTurn > MAX_PLAYERS - 1:
+          currentTurn = 0
     print("Player {1} ({0}) eliminated, skipping turn...".format(name, idnum))
+
+    # --- SEND NEXT TURN MESSAGE ---
     send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
+    
     return
 
 
-  # game over, time for round 2, or n+1...
+  # -- GAME COMPLETE -> START A NEW GAME --
   if len(eliminated_clients) == (MAX_PLAYERS-1):
-
     time.sleep(WON_DELAY_S)
-
-    if idnum not in eliminated_clients:
-      # GAME HAS BEEN WON, START A NEW SEQUENCE HERE.
-      send_msg_all_clients(tiles.MessageGameStart().pack())
-      # random new clients to play game, if more than max connections
-      currentTurn = 0
-      eliminated_clients = []
-      if len(live_idnums) > MAX_PLAYERS:
-        started_idnums = random.sample(live_idnums, MAX_PLAYERS)
-      else:
-        started_idnums = live_idnums.copy()
-
-      for idnum in started_idnums:
-        for _ in range(tiles.HAND_SIZE):
-          tileid = tiles.get_random_tileid()
-          msg_specific_client(tiles.MessageAddTileToHand(tileid).pack(), idnum)
-      first_start = True
-      board.reset()
-      return
-
-  
-
-  buffer = bytearray()
-  data = key.data
-
-  if mask & selectors.EVENT_READ:
-    chunk = connection.recv(4096)
-    if not chunk:
-      print('Closing connection to', data.addr)
-      sel.unregister(connection)
-      connection.close()
-
-    buffer.extend(chunk)
-    msg, consumed = tiles.read_message_from_bytearray(buffer)
-    print('received message {}'.format(msg))
-
-    buffer = buffer[consumed:]
-
-  
+    start_new_game()
 
     # sent by the player to put a tile onto the board (in all turns except
     # their second)
-    if isinstance(msg, tiles.MessagePlaceTile):
-      if board.set_tile(msg.x, msg.y, msg.tileid, msg.rotation, msg.idnum):
-        # notify client that placement was successful
-        send_msg_all_clients(msg.pack())
+  if isinstance(msg, tiles.MessagePlaceTile):
+    if board.set_tile(msg.x, msg.y, msg.tileid, msg.rotation, msg.idnum):
+      # notify client that placement was successful
+      send_msg_all_clients(msg.pack())
 
+      # check for token movement
+      positionupdates, eliminated = board.do_player_movement(live_idnums)
+
+      for msg in positionupdates:
+        send_msg_all_clients(msg.pack())
+      
+      for idnum in eliminated:
+        if idnum not in eliminated_clients:
+          print("A player was eliminated!")
+          eliminated_clients.append(idnum)
+          send_msg_all_clients(tiles.MessagePlayerEliminated(idnum).pack())
+
+      # pickup a new tile
+      tileid = tiles.get_random_tileid()
+      msg_specific_client(tiles.MessageAddTileToHand(tileid).pack(), started_idnums[currentTurn])
+
+      # start next turn
+      currentTurn += 1
+      #back to first player
+      # -------------- THIS NEEDS TO LATER BE CHANGED FROM 0 TO INITIAL PLAYER ---------------
+      if currentTurn > MAX_PLAYERS - 1:
+        currentTurn = 0
+      send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
+
+  # sent by the player in the second turn, to choose their token's
+  # starting path
+  elif isinstance(msg, tiles.MessageMoveToken):
+    if not board.have_player_position(msg.idnum):
+      if board.set_player_start_position(msg.idnum, msg.x, msg.y, msg.position):
         # check for token movement
         positionupdates, eliminated = board.do_player_movement(live_idnums)
 
@@ -170,47 +153,14 @@ def client_handler(key, mask):
         
         for idnum in eliminated:
           if idnum not in eliminated_clients:
-            print("A player was eliminated!")
             eliminated_clients.append(idnum)
             send_msg_all_clients(tiles.MessagePlayerEliminated(idnum).pack())
-
-        # pickup a new tile
-        tileid = tiles.get_random_tileid()
-        connection.send(tiles.MessageAddTileToHand(tileid).pack())
-
+        
         # start next turn
         currentTurn += 1
-        #back to first player
-        # -------------- THIS NEEDS TO LATER BE CHANGED FROM 0 TO INITIAL PLAYER ---------------
         if currentTurn > MAX_PLAYERS - 1:
           currentTurn = 0
         send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
-        # OLD
-        # connection.send(tiles.MessagePlayerTurn(idnum).pack())
-
-    # sent by the player in the second turn, to choose their token's
-    # starting path
-    elif isinstance(msg, tiles.MessageMoveToken):
-      if not board.have_player_position(msg.idnum):
-        if board.set_player_start_position(msg.idnum, msg.x, msg.y, msg.position):
-          # check for token movement
-          positionupdates, eliminated = board.do_player_movement(live_idnums)
-
-          for msg in positionupdates:
-            send_msg_all_clients(msg.pack())
-          
-          for idnum in eliminated:
-            if idnum not in eliminated_clients:
-              eliminated_clients.append(idnum)
-              send_msg_all_clients(tiles.MessagePlayerEliminated(idnum).pack())
-          
-          # start next turn
-          currentTurn += 1
-          if currentTurn > MAX_PLAYERS - 1:
-            currentTurn = 0
-          send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
-          # OLD
-          # connection.send(tiles.MessagePlayerTurn(idnum).pack())
 
 
 def accept_new_client(socket, times_connected):
@@ -223,7 +173,6 @@ def accept_new_client(socket, times_connected):
     events = selectors.EVENT_READ | selectors.EVENT_WRITE
     sel.register(connection, events, data=data)
 
-
 def send_msg_all_clients(msg):
   global client_connections
   for client in client_connections:
@@ -235,6 +184,107 @@ def msg_specific_client(msg, idnum):
   for client in client_connections:
     if client[1] == idnum:
       client[0].send(msg)
+
+def new_player_joined(name, idnum):
+
+  global live_idnums
+
+  # Add id check, use connections
+  # Initiates a new player joining.
+  if idnum not in live_idnums:
+    live_idnums.append(idnum)
+    # --- SEND A WELCOME MESSAGE ---
+    msg_specific_client(tiles.MessageWelcome(idnum).pack(), idnum)
+    
+    # --- SEND PLAYER JOINED (ALL CLIENTS) ---
+    if joined_msgs:
+      for msg in joined_msgs:
+        msg_specific_client(msg, idnum)
+    send_msg_all_clients(tiles.MessagePlayerJoined(name, idnum).pack())
+    joined_msgs.append(tiles.MessagePlayerJoined(name, idnum).pack())
+
+    # --- SEND ALL MOVES UP TO THIS POINT ---
+    
+
+
+def start_new_game():
+
+  global currentTurn
+  global eliminated_clients
+  global started_idnums
+  global disconnected_count
+
+  # reset globals
+  disconnected_count = 0
+  currentTurn = 0
+  eliminated_clients = []
+  board.reset()
+
+  # --- SEND NEW GAME MESSAGE (ALL CLIENTS) ---
+  send_msg_all_clients(tiles.MessageGameStart().pack())
+  
+  #  -------------------------------------------------------------------- Add check later in case people leave.
+  # this, by definition, chooses random clients to play, and a random turn order.
+  started_idnums = random.sample(live_idnums, MAX_PLAYERS)
+
+  # --- SEND TILES TO (ACTIVE) CLIENTS ---
+  for idnum in started_idnums:
+        for _ in range(tiles.HAND_SIZE):
+          tileid = tiles.get_random_tileid()
+          msg_specific_client(tiles.MessageAddTileToHand(tileid).pack(), idnum)
+  
+  # --- SEND NEW TURN MESSAGE (ALL CLIENTS) ---
+  send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
+
+
+#-------------------------------------------------- LEAVEING THEN JOINGING THEN LECINVG AIN .... MIGHT ISSUES
+def receive_msg_client(key, mask, idnum):
+  
+  global live_idnums
+  global client_connections
+  global disconnected_count
+
+  buffer = bytearray()
+  connection = key.fileobj
+  data = key.data
+
+  if mask & selectors.EVENT_READ:
+    try:
+      chunk = connection.recv(4096)
+    except:
+      print("Connection to {} lost, closing connection.".format(data.addr))
+      chunk = b''
+    # can move turn/eliminated checks here to not save moves made by players
+    # Eliminate if disconnected.
+    if not chunk:
+      print('Closing connection to', data.addr)
+      sel.unregister(connection)
+      connection.close()
+
+      # DISCONNECT SPECIAL CONDITIONS
+
+      # REMOVE FROM LIVEID LIST
+      live_idnums.remove(idnum)
+      # REMOVE FROM CONNECTIONS
+      for client in client_connections:
+        if client[1] == idnum:
+          client_connections.remove(client)
+      # ELIMINATE FROM GAME
+      eliminated_clients.append(idnum)
+      send_msg_all_clients(tiles.MessagePlayerEliminated(idnum).pack())
+      # REMOVE FROM STARTED LIST
+
+
+    buffer.extend(chunk)
+    msg, consumed = tiles.read_message_from_bytearray(buffer)
+    print('received message {}'.format(msg))
+
+    buffer = buffer[consumed:]
+    return msg
+  else:
+    return False
+
+  
 
 
 # A list of tuples outlining the connections to the server

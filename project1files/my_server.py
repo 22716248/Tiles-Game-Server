@@ -27,7 +27,7 @@ import types
 import random
 import time
 
-MAX_PLAYERS = 3
+MAX_PLAYERS = 4
 WON_DELAY_S = 4
 
 # connections
@@ -42,6 +42,8 @@ first_start = True
 joined_msgs = []
 eliminated_clients = []
 disconnected_clients = []
+messages_sent = []
+# The clients crash if this 
 
 """ HANDLES CLIENT CONNECTIONS """
 def client_handler(key, mask):
@@ -66,7 +68,8 @@ def client_handler(key, mask):
 
   # --  NEW PLAYER JOINS --
   if idnum not in live_idnums:
-    new_player_joined(name, idnum)
+    if idnum not in disconnected_clients:
+      new_player_joined(name, idnum)
 
   # -- START FIRST GAME --
   if len(live_idnums) >= MAX_PLAYERS:
@@ -75,7 +78,8 @@ def client_handler(key, mask):
       start_new_game()
   else:
     # - CANNOT CONTINUE UNLESS SUFFICIENT PLAYERS CONNECTED -
-    return
+    if first_start:
+      return
   
   # -- SKIP DISCONNECTED PLAYERS --
   if started_idnums[currentTurn] in disconnected_clients:
@@ -91,23 +95,29 @@ def client_handler(key, mask):
   if idnum != started_idnums[currentTurn]:
     return
 
+  # -- GAME COMPLETE -> START A NEW GAME --
+  if len(eliminated_clients) >= (MAX_PLAYERS-1):
+    time.sleep(WON_DELAY_S)
+    if len(live_idnums) < MAX_PLAYERS:
+      started_idnums = []
+      first_start = True
+      return
+    else:
+      start_new_game()
+      return
+
   # -- SKIP ELIMINATED PLAYERS --
   if idnum in eliminated_clients:
     currentTurn += 1
     if currentTurn > MAX_PLAYERS - 1:
           currentTurn = 0
     print("Player {1} ({0}) eliminated, skipping turn...".format(name, idnum))
-
     # --- SEND NEXT TURN MESSAGE ---
     send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
-    
     return
 
 
-  # -- GAME COMPLETE -> START A NEW GAME --
-  if len(eliminated_clients) == (MAX_PLAYERS-1):
-    time.sleep(WON_DELAY_S)
-    start_new_game()
+  
 
     # sent by the player to put a tile onto the board (in all turns except
     # their second)
@@ -124,7 +134,7 @@ def client_handler(key, mask):
       
       for idnum in eliminated:
         if idnum not in eliminated_clients:
-          print("A player was eliminated!")
+          print("player {} was eliminated!".format(idnum))
           eliminated_clients.append(idnum)
           send_msg_all_clients(tiles.MessagePlayerEliminated(idnum).pack())
 
@@ -135,7 +145,6 @@ def client_handler(key, mask):
       # start next turn
       currentTurn += 1
       #back to first player
-      # -------------- THIS NEEDS TO LATER BE CHANGED FROM 0 TO INITIAL PLAYER ---------------
       if currentTurn > MAX_PLAYERS - 1:
         currentTurn = 0
       send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
@@ -153,6 +162,7 @@ def client_handler(key, mask):
         
         for idnum in eliminated:
           if idnum not in eliminated_clients:
+            print("player {} was eliminated!".format(idnum))
             eliminated_clients.append(idnum)
             send_msg_all_clients(tiles.MessagePlayerEliminated(idnum).pack())
         
@@ -175,9 +185,10 @@ def accept_new_client(socket, times_connected):
 
 def send_msg_all_clients(msg):
   global client_connections
+  global messages_sent
+  messages_sent.append(msg)
   for client in client_connections:
-    connection = client[0]
-    connection.send(msg)
+    client[0].send(msg)
 
 def msg_specific_client(msg, idnum):
   global client_connections
@@ -204,7 +215,10 @@ def new_player_joined(name, idnum):
     joined_msgs.append(tiles.MessagePlayerJoined(name, idnum).pack())
 
     # --- SEND ALL MOVES UP TO THIS POINT ---
-    
+    if started_idnums:
+      for msg in messages_sent:
+        msg_specific_client(msg, idnum)
+
 
 
 def start_new_game():
@@ -213,11 +227,14 @@ def start_new_game():
   global eliminated_clients
   global started_idnums
   global disconnected_count
+  global messages_sent
+  global board
 
   # reset globals
   disconnected_count = 0
   currentTurn = 0
   eliminated_clients = []
+  messages_sent = []
   board.reset()
 
   # --- SEND NEW GAME MESSAGE (ALL CLIENTS) ---
@@ -270,9 +287,12 @@ def receive_msg_client(key, mask, idnum):
         if client[1] == idnum:
           client_connections.remove(client)
       # ELIMINATE FROM GAME
-      eliminated_clients.append(idnum)
-      send_msg_all_clients(tiles.MessagePlayerEliminated(idnum).pack())
-      # REMOVE FROM STARTED LIST
+      if idnum in started_idnums:
+        if idnum not in eliminated_clients:
+          eliminated_clients.append(idnum)
+          # DO NOT ELIMINATE BEFORE FIRST TURN???!!!
+          send_msg_all_clients(tiles.MessagePlayerEliminated(idnum).pack())
+      disconnected_clients.append(idnum)
 
 
     buffer.extend(chunk)

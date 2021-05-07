@@ -26,12 +26,15 @@ import time
 
 MAX_PLAYERS = tiles.PLAYER_LIMIT
 WON_DELAY_S = 4 #seconds
+AFK_TIMER =   10 #seconds
 
 # GLOBALS
 sel =                   selectors.DefaultSelector()
 board =                 tiles.Board()
 currentTurn =           0
+time_spent_afk =        0
 first_start =           True
+first_turn =            True
 started_idnums =        []
 live_idnums =           []
 client_connections =    []
@@ -40,6 +43,7 @@ eliminated_clients =    []
 disconnected_clients =  []
 messages_sent =         []
 player_hand_dict =      {}
+afk_dict =              {}
 # client crash problem
 
 """ HANDLES CLIENT CONNECTIONS """
@@ -59,6 +63,11 @@ def client_handler(key, mask):
   global joined_msgs
   global started_idnums
   global eliminated_clients
+  global player_hand_dict
+  global timer_dict
+  global afk_dict
+  global time_spent_afk
+  global first_turn
 
   # if a player leaves before every active player makes a turn, the client crashes...
   msg = receive_msg_client(key, mask, idnum)
@@ -92,6 +101,32 @@ def client_handler(key, mask):
   if idnum != started_idnums[currentTurn]:
     return
 
+  # -- -- START AFK TIMER -- --
+  if first_turn:
+    first_turn = False
+    afk_dict[started_idnums[currentTurn]] = time.perf_counter()
+
+  if not msg:
+    time_spent_afk += time.perf_counter() - afk_dict[started_idnums[currentTurn]]
+    afk_dict[started_idnums[currentTurn]] = time.perf_counter()
+
+    # AN AFK PLAYER IS MANAGED HERE
+    if time_spent_afk >= AFK_TIMER:
+      print("Player {} AFK".format(idnum))
+      time.sleep(2)
+      make_valid_move(started_idnums[currentTurn])
+    return
+  else:
+    time_spent_afk = 0
+    if started_idnums[currentTurn] in afk_dict:
+      afk_dict.pop(started_idnums[currentTurn])
+
+  # AN AFK PLAYER SHOULDN'T GET HERE
+  first_turn = True
+
+  # -- -- END AFK TIMER -- --
+
+
   # -- GAME COMPLETE -> START A NEW GAME --
   if len(eliminated_clients) >= (MAX_PLAYERS-1):
     time.sleep(WON_DELAY_S)
@@ -113,9 +148,7 @@ def client_handler(key, mask):
     send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
     return
 
-
-  
-
+    #  ---- NEXT TURN BEGINS HERE ----
     # sent by the player to put a tile onto the board (in all turns except
     # their second)
   if isinstance(msg, tiles.MessagePlaceTile):
@@ -135,13 +168,14 @@ def client_handler(key, mask):
           eliminated_clients.append(idnum)
           send_msg_all_clients(tiles.MessagePlayerEliminated(idnum).pack())
 
-      # pickup a new tile
+      # pickup a new tile, update hand dictionary
+      player_hand_dict[started_idnums[currentTurn]].remove(msg.tileid)
       tileid = tiles.get_random_tileid()
       msg_specific_client(tiles.MessageAddTileToHand(tileid).pack(), started_idnums[currentTurn])
+      player_hand_dict[started_idnums[currentTurn]].append(tileid)
 
       # start next turn
       currentTurn += 1
-      #back to first player
       if currentTurn > MAX_PLAYERS - 1:
         currentTurn = 0
       send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
@@ -168,6 +202,8 @@ def client_handler(key, mask):
         if currentTurn > MAX_PLAYERS - 1:
           currentTurn = 0
         send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
+
+  
 
 
 def accept_new_client(socket, times_connected):
@@ -199,6 +235,7 @@ def new_player_joined(name, idnum):
 
   # Add id check, use connections
   # Initiates a new player joining.
+
   if idnum not in live_idnums:
     live_idnums.append(idnum)
     # --- SEND A WELCOME MESSAGE ---
@@ -217,7 +254,6 @@ def new_player_joined(name, idnum):
         msg_specific_client(msg, idnum)
 
 
-
 def start_new_game():
 
   global currentTurn
@@ -226,12 +262,14 @@ def start_new_game():
   global disconnected_count
   global messages_sent
   global board
+  global player_hand_dict
 
   # reset globals
   disconnected_count = 0
   currentTurn = 0
   eliminated_clients = []
   messages_sent = []
+  player_hand_dict = {}
   board.reset()
 
   # --- SEND NEW GAME MESSAGE (ALL CLIENTS) ---
@@ -243,9 +281,11 @@ def start_new_game():
 
   # --- SEND TILES TO (ACTIVE) CLIENTS ---
   for idnum in started_idnums:
-        for _ in range(tiles.HAND_SIZE):
-          tileid = tiles.get_random_tileid()
-          msg_specific_client(tiles.MessageAddTileToHand(tileid).pack(), idnum)
+    player_hand_dict[idnum] = []
+    for _ in range(tiles.HAND_SIZE):
+      tileid = tiles.get_random_tileid()
+      player_hand_dict[idnum].append(tileid)
+      msg_specific_client(tiles.MessageAddTileToHand(tileid).pack(), idnum)
   
   # --- SEND NEW TURN MESSAGE (ALL CLIENTS) ---
   send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
@@ -301,8 +341,8 @@ def receive_msg_client(key, mask, idnum):
   else:
     return False
 
-  
-
+def make_valid_move(idnum):
+  return
 
 # A list of tuples outlining the connections to the server
 times_connected = 0

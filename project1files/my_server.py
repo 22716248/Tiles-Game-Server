@@ -1,8 +1,5 @@
 # CITS3002 2021 Assignment
 #
-# This file implements a basic server that allows a single client to play a
-# single game with no other participants, and very little error checking.
-#
 # Any other clients that connect during this time will need to wait for the
 # first client's game to complete.
 #
@@ -17,7 +14,7 @@
 
 # CITS3002 Server Project - Sockets.
 # Jakub Wysocki (22716248)
-# Some code adapted from RealPython: https://realpython.com/python-sockets/#handling-multiple-connections
+# Some socket selector code inspired from RealPython: https://realpython.com/python-sockets/#handling-multiple-connections
 
 import socket
 import sys
@@ -27,23 +24,23 @@ import types
 import random
 import time
 
-MAX_PLAYERS = 4
-WON_DELAY_S = 4
+MAX_PLAYERS = tiles.PLAYER_LIMIT
+WON_DELAY_S = 4 #seconds
 
-# connections
-sel = selectors.DefaultSelector()
-live_idnums = []
-client_connections = []
-# flags/parameters which outline the current game state
-board = tiles.Board()
-currentTurn = 0
-started_idnums = []
-first_start = True
-joined_msgs = []
-eliminated_clients = []
-disconnected_clients = []
-messages_sent = []
-# The clients crash if this 
+# GLOBALS
+sel =                   selectors.DefaultSelector()
+board =                 tiles.Board()
+currentTurn =           0
+first_start =           True
+started_idnums =        []
+live_idnums =           []
+client_connections =    []
+joined_msgs =           []  ## RESET AFTER LEAVING???
+eliminated_clients =    []
+disconnected_clients =  []
+messages_sent =         []
+player_hand_dict =      {}
+# client crash problem
 
 """ HANDLES CLIENT CONNECTIONS """
 def client_handler(key, mask):

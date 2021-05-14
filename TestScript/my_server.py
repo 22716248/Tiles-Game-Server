@@ -41,9 +41,9 @@ import time
 
 # CONSTANTS
 MAX_PLAYERS = tiles.PLAYER_LIMIT
-WON_DELAY_S = 5 #seconds
-AFK_TIMER =   10 #seconds
-START_WAIT =  10 #seconds
+WON_DELAY_S = 4 #seconds
+AFK_TIMER =   3 #seconds
+START_WAIT =  3 #seconds
 
 # GLOBALS
 sel =                   selectors.DefaultSelector()
@@ -58,7 +58,7 @@ force_start =           False
 started_idnums =        []
 live_idnums =           []
 client_connections =    []
-joined_msgs =           []
+joined_msgs =           []  ## RESET AFTER LEAVING???
 eliminated_clients =    []
 disconnected_clients =  []
 messages_sent =         []
@@ -102,6 +102,7 @@ def client_handler(key, mask):
   global force_start
   global first_timer
 
+  # if a player leaves before every active player makes a turn, the client crashes...
   msg = receive_msg_client(key, mask, idnum)
 
   # --  NEW PLAYER JOINS --
@@ -124,7 +125,6 @@ def client_handler(key, mask):
   else:
     # - CANNOT CONTINUE UNLESS SUFFICIENT PLAYERS CONNECTED -
     if first_start:
-      # START GAME IF NO NEW PLAYERS JOIN WITHIN START_WAIT SECONDS (THE GIVEN TESTER NEEDED THIS)
       if first_timer:
         wait_timer = time.perf_counter()
         first_timer = False
@@ -168,6 +168,10 @@ def client_handler(key, mask):
     send_msg_all_clients(tiles.MessagePlayerTurn(started_idnums[currentTurn]).pack())
     return
 
+  # MAKE A VALID MOVE, BASED ON CLIENT MESSAGE,
+  # OR A RANDOM MOVE FOR AFK PLAYERS
+  # make_valid_move(started_idnums[currentTurn], msg, False) 
+
   # -- -- START AFK TIMER -- --
   if first_turn:
     first_turn = False
@@ -182,10 +186,10 @@ def client_handler(key, mask):
     # AN AFK PLAYER IS MANAGED HERE
     if time_spent_afk >= AFK_TIMER:
       print("Player {}, ({}) AFK: Random Move.".format(idnum, name))
-      if not first_start: # Check if game has started
+      time.sleep(1) # Give server time ------------------------------------------------------------- remove later
+      if not first_start: # Check if game gas started
         time_spent_afk = 0
         first_turn = True
-        # MAKE A VALID, RANDOM MOVE FOR THE PLAYER
         make_valid_move(started_idnums[currentTurn], None, True)
     return
   else:
@@ -198,7 +202,7 @@ def client_handler(key, mask):
 
   # -- -- END AFK TIMER -- --
 
-  # MAKE A VALID MOVE, BASED ON CLIENT MESSAGE.
+  # MAKE A VALID MOVE, BASED ON CLIENT MESSAGE
   make_valid_move(started_idnums[currentTurn], msg, False)
 
 
@@ -261,13 +265,11 @@ def new_player_joined(name, idnum):
     joined_msgs.append(tiles.MessagePlayerJoined(name, idnum).pack())
     # --- SEND ALL MOVES UP TO THIS POINT ---
     if started_idnums:
-      # Adding below fixes tester for fifth test, manually it works fine
-      # The tester doesn't seem to recognise the new game start for spectators.
-      # See the below comment.
+      # Lot of stuff here is to make it work with the given tester
       for msg in messages_sent:
-        #test_msg, consumed = tiles.read_message_from_bytearray(msg)
-        #if not isinstance(test_msg, tiles.MessageGameStart):
-        msg_specific_client(msg, idnum)
+        test_msg, consumed = tiles.read_message_from_bytearray(msg)
+        if not isinstance(test_msg, tiles.MessageGameStart):
+          msg_specific_client(msg, idnum)
 
 
 def start_new_game():
@@ -300,6 +302,7 @@ def start_new_game():
   # --- SEND NEW GAME MESSAGE (ALL CLIENTS) ---
   send_msg_all_clients(tiles.MessageGameStart().pack())
   
+  #  -------------------------------------------------------------------- Add check later in case people leave.
   # this, by definition, chooses random clients to play, and a random turn order.
   num_players = 4
   if len(live_idnums) < 4:
@@ -432,8 +435,7 @@ def make_valid_move(idnum, msg, is_random):
   
   # This uses a brute force method to find a valid tile, will run slower on
   # larger boards. There is a possibility of using inbuilt ig_game_state to make
-  # smarter decisions if required, so the extra code has been left in place. 
-  # Currently a != "second" would suffice.
+  # smarter decisions if required.
   if is_random:
     ### FOR FIRST TURN ###
     if id_game_state[started_idnums[currentTurn]][0] == "first":
@@ -569,9 +571,7 @@ listen_sock.bind(server_address)
 
 print('listening on {}'.format(listen_sock.getsockname()))
 
-# leave as system default
-listen_sock.listen()
-# this will not "hang" the server
+listen_sock.listen(32)
 listen_sock.setblocking(False)
 
 # selector usage
